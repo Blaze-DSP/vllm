@@ -306,6 +306,7 @@ if TYPE_CHECKING:
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
+    VLLM_TRITON_DECODE_MAX_REQS: int = 16
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool | None = None
@@ -2126,6 +2127,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # TODO(alexm-redhat): Tune to be more dynamic based on GPU type
     "VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD": lambda: int(
         int(os.getenv("VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD", 256))
+    ),
+    # TRITON_DECODE_FLASH_ATTN: largest single-token decode batch routed to the
+    # Triton kernel; larger batches use FlashAttention. 16 is where Triton stops
+    # splitting the KV sequence (128 // 8 KV heads).
+    "VLLM_TRITON_DECODE_MAX_REQS": lambda: int(
+        os.getenv("VLLM_TRITON_DECODE_MAX_REQS", "16")
     ),
     # Token-count cutoff for multi-stream overlap of the attention input
     # GEMM with auxiliary GEMMs (e.g. fused_wqa_wkv overlapped with indexer

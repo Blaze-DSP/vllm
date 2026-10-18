@@ -73,6 +73,19 @@ No attention override is needed for supported multimodal models:
 vllm serve google/gemma-4-31B-it
 ```
 
+`TRITON_DECODE_FLASH_ATTN` is an opt-in variant that also routes small
+single-token decode batches to Triton, whose split-KV decode kernel is faster
+than FA4 there; prefills, mixed batches and decode batches larger than
+`VLLM_TRITON_DECODE_MAX_REQS` (default 16) stay on FlashAttention. CUDA-graph
+capture uses the same rule for each captured size, so a replayed graph always
+runs the child it was captured with:
+
+```bash
+vllm serve google/gemma-4-26B-A4B-it --language-model-only \
+  --attention-backend TRITON_DECODE_FLASH_ATTN \
+  --attention-config '{"flash_attn_version": 4}'
+```
+
 ### Triton/FlashInfer Composite
 
 On Blackwell, `TRITON_FLASHINFER` is preferred for compatible

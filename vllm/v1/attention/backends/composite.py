@@ -8,6 +8,7 @@ from typing import ClassVar, Protocol, cast
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -83,6 +84,10 @@ class CompositeAttentionRouting(Protocol):
         """Whether this child must support the model's image-mask requirement."""
         ...
 
+    def capture_select(self, metadata: CommonAttentionMetadata) -> int:
+        """Child to capture for this graph; replay must select the same one."""
+        return self.capture_variant
+
 
 class MMPrefixAttentionRouting(CompositeAttentionRouting):
     """Route image masks to variant zero and causal queries to variant one."""
@@ -113,6 +118,30 @@ class MMPrefixAttentionRouting(CompositeAttentionRouting):
     @staticmethod
     def variant_uses_mm_prefix(variant: int) -> bool:
         return variant == 0
+
+
+class MMPrefixOrDecodeAttentionRouting(MMPrefixAttentionRouting):
+    """Also route small single-token decode batches to variant zero.
+
+    On SM90 the split-KV Triton kernel decodes Gemma 4's 256/512-dim heads
+    several times faster than FA4 at small batch, while FA keeps prefill,
+    mixed batches and large decode batches. Graph capture follows the same
+    rule per captured size, so replay always sees the captured child.
+    """
+
+    capture_variant: ClassVar[int] = 0
+
+    def __init__(self, layer_names: list[str], vllm_config: VllmConfig) -> None:
+        super().__init__(layer_names, vllm_config)
+        self.max_decode_reqs = envs.VLLM_TRITON_DECODE_MAX_REQS
+
+    def select(self, metadata: CommonAttentionMetadata) -> int:
+        if metadata.max_query_len <= 1 and metadata.num_reqs <= self.max_decode_reqs:
+            return 0
+        return super().select(metadata)
+
+    def capture_select(self, metadata: CommonAttentionMetadata) -> int:
+        return self.select(metadata)
 
 
 def _intersect_kernel_block_sizes(
@@ -328,7 +357,7 @@ def create_composite_attention_backend(
             )
 
         def build_for_cudagraph_capture(self, common_attn_metadata):
-            variant = routing_policy.capture_variant
+            variant = self.routing.capture_select(common_attn_metadata)
             metadata = self._builders[variant].build_for_cudagraph_capture(
                 common_attn_metadata
             )

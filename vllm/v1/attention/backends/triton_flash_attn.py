@@ -8,6 +8,7 @@ from vllm.config.cache import CacheDType
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.composite import (
     MMPrefixAttentionRouting,
+    MMPrefixOrDecodeAttentionRouting,
     create_composite_attention_backend,
 )
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
@@ -60,6 +61,17 @@ TritonFlashAttentionBackend = create_composite_attention_backend(
     backend_name="TRITON_FLASH_ATTN",
     module=__name__,
     routing_policy=MMPrefixAttentionRouting,
+    head_sizes=(256, 512),
+    device_major=9,
+)
+
+TritonDecodeFlashAttentionBackend = create_composite_attention_backend(
+    TritonAttentionBackend,
+    _FABackend,
+    name="TritonDecodeFlashAttentionBackend",
+    backend_name="TRITON_DECODE_FLASH_ATTN",
+    module=__name__,
+    routing_policy=MMPrefixOrDecodeAttentionRouting,
     head_sizes=(256, 512),
     device_major=9,
 )
