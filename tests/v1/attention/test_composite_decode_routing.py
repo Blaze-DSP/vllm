@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.composite import (
     MMPrefixAttentionRouting,
     MMPrefixOrDecodeAttentionRouting,
@@ -14,10 +15,13 @@ from vllm.v1.attention.backends.composite import (
 TRITON, FLASH_ATTN = 0, 1
 
 
-def _config():
-    layer = SimpleNamespace(sliding_window=None)
+def _config(sliding_window=None, clamped=False, model_config=None):
+    layer = SimpleNamespace(
+        sliding_window=sliding_window, mm_prefix_clamp_sliding_window=clamped
+    )
     return SimpleNamespace(
-        compilation_config=SimpleNamespace(static_forward_context={"attn": layer})
+        compilation_config=SimpleNamespace(static_forward_context={"attn": layer}),
+        model_config=model_config,
     )
 
 
@@ -51,3 +55,42 @@ def test_plain_mm_prefix_routing_captures_its_fixed_variant():
     routing = MMPrefixAttentionRouting(["attn"], _config())
     assert routing.select(_batch(1, 1)) == FLASH_ATTN
     assert routing.capture_select(_batch(1, 1)) == routing.capture_variant
+
+
+TEXT_ONLY = SimpleNamespace(is_multimodal_model=False)
+LANGUAGE_MODEL_ONLY = SimpleNamespace(
+    is_multimodal_model=True,
+    multimodal_config=SimpleNamespace(language_model_only=True),
+)
+WITH_IMAGES = SimpleNamespace(
+    is_multimodal_model=True,
+    multimodal_config=SimpleNamespace(language_model_only=False),
+)
+
+
+@pytest.mark.parametrize(
+    ("model_config", "expected"),
+    [
+        # No image can reach a batch: routing is a function of the batch shape,
+        # so spec-decode verify batches (1 + K queries) can keep FULL graphs.
+        (TEXT_ONLY, AttentionCGSupport.UNIFORM_BATCH),
+        (LANGUAGE_MODEL_ONLY, AttentionCGSupport.UNIFORM_BATCH),
+        # Image ranges make routing data-dependent: keep the base level.
+        (WITH_IMAGES, AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE),
+    ],
+)
+def test_decode_routing_graph_support(model_config, expected):
+    config = _config(sliding_window=128, clamped=True, model_config=model_config)
+    support = MMPrefixOrDecodeAttentionRouting.get_cudagraph_support(config, None)
+    assert support == expected
+    assert MMPrefixAttentionRouting.get_cudagraph_support(config, None) == (
+        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    )
+
+
+def test_unclamped_window_still_vetoes_graphs():
+    # A layer that does not clamp its window to the image span (as the Gemma 4
+    # MTP drafter's sliding layers did) must keep vetoing graphs.
+    config = _config(sliding_window=128, clamped=False, model_config=TEXT_ONLY)
+    support = MMPrefixOrDecodeAttentionRouting.get_cudagraph_support(config, None)
+    assert support == AttentionCGSupport.NEVER

@@ -229,6 +229,16 @@ class Gemma4MTPAttention(nn.Module):
             quant_config=quant_config,
             logits_soft_cap=attn_logits_soft_cap,
             per_layer_sliding_window=sliding_window,
+            # The MTP head reads the target's KV cache (see
+            # Gemma4Proposer._setup_gemma4_kv_sharing), so its sliding layers
+            # must declare the same window semantics as the target layers they
+            # share with -- Gemma4Attention passes exactly this. Without it the
+            # drafter claims an unclamped window: a cosmetic difference for
+            # text, but any backend that vetoes graphs on unclamped windows
+            # (the composite routing backend does) then drops the whole run to
+            # PIECEWISE, and with images the draft would mask the image span
+            # differently from the layer whose cache it reads.
+            mm_prefix_clamp_sliding_window=self.is_sliding,
             prefix=f"{prefix}.attn",
         )
 

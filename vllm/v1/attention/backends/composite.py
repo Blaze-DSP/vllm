@@ -52,6 +52,21 @@ def requires_mm_prefix(
     return False
 
 
+def _mm_inputs_possible(vllm_config: VllmConfig) -> bool:
+    """Whether an image range can ever reach an attention batch.
+
+    Routing that depends on `mm_req_doc_ranges` is data-dependent, so a graph
+    captured on dummy (image-free) metadata may replay the wrong child. When
+    the model takes no multimodal input at all the policy is a pure function
+    of the batch shape, which a captured graph pins.
+    """
+    model_config = vllm_config.model_config
+    if model_config is None or not model_config.is_multimodal_model:
+        return False
+    mm_config = model_config.multimodal_config
+    return mm_config is None or not mm_config.language_model_only
+
+
 def _has_unclamped_window(layers) -> bool:
     return any(
         getattr(layer, "sliding_window", None) is not None
@@ -142,6 +157,26 @@ class MMPrefixOrDecodeAttentionRouting(MMPrefixAttentionRouting):
 
     def capture_select(self, metadata: CommonAttentionMetadata) -> int:
         return self.select(metadata)
+
+    @staticmethod
+    def get_cudagraph_support(
+        vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec
+    ) -> AttentionCGSupport:
+        support = MMPrefixAttentionRouting.get_cudagraph_support(
+            vllm_config, kv_cache_spec
+        )
+        # Without this, a drafter forces uniform_decode_query_len > 1 and
+        # resolve_cudagraph_mode_and_sizes() sees a policy that only claims
+        # UNIFORM_SINGLE_TOKEN_DECODE, so it drops the *whole* run to
+        # PIECEWISE -- the composite backend then costs full graphs without
+        # buying anything, because the verify batches route to the causal
+        # child anyway. Every batch this policy sees is routed by shape alone
+        # (max_query_len, num_reqs) once no image can reach it, and both are
+        # fixed within a captured uniform batch, so replay always selects the
+        # child that was captured.
+        if support is AttentionCGSupport.NEVER or _mm_inputs_possible(vllm_config):
+            return support
+        return max(support, AttentionCGSupport.UNIFORM_BATCH, key=lambda s: s.value)
 
 
 def _intersect_kernel_block_sizes(
